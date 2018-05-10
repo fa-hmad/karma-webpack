@@ -83,6 +83,10 @@ function Plugin(
   this.basePath = basePath
   this.waiting = []
 
+  // Hot reloading
+  this.hotFiles = []
+  this.failedFiles = []
+
   var compiler
 
   try {
@@ -115,6 +119,57 @@ function Plugin(
   })
 
   compiler.plugin('done', function(stats) {
+    function isBuilt(module) {
+      return module.rawRequest && module.built;
+    }
+
+    function getId(module) {
+      return module.rawRequest;
+    }
+
+    function setKeyTrue(acc, key) {
+      acc[key] = true;
+      return acc;
+    }
+
+    var affectedFiles = stats.compilation.modules
+      .filter(isBuilt)
+      .map(getId)
+      .reduce(setKeyTrue, {});
+
+    var seen = {};
+
+    /**
+     * Recursive method to find affected files
+     *
+     * @param {module} module Module from webpack
+     */
+    function findAffected(module) {
+      if (seen[module.rawRequest]) return;
+      seen[module.rawRequest] = true;
+
+      if (affectedFiles[module.rawRequest]) return;
+      if (!module.depedencies) return;
+      if (!module.rawRequest) return;
+
+      // Check neighbours
+      module.depedencies.forEach(function (dep) {
+        if (!dep.module) return;
+        findAffected(dep.module);
+        if (affectedFiles[dep.module.rawRequest]) {
+          affectedFiles[module.rawRequest] = true;
+        }
+      });
+    }
+
+    stats.compilation.modules.forEach(findAffected);
+    this.hotFiles = Object.keys(affectedFiles);
+
+    // For debugging purposes
+    this.hotFiles.forEach(function (file) {
+      console.log('Detected change, recompiling: ' + file);
+    });
+
     var applyStats = Array.isArray(stats.stats) ? stats.stats : [stats]
     var assets = []
     var noAssets = false
@@ -165,6 +220,14 @@ function Plugin(
       })
     }
   })
+
+  emitter.on('run_complete', function(args) {
+    if (args.getResults().failed) {
+      [].push.apply(this.failedFiles, this.hotFiles);
+    } else {
+      this.failedFiles = [];
+    }
+  }.bind(this));
 
   emitter.on('exit', function(done) {
     middleware.close()
@@ -275,7 +338,12 @@ function createPreprocesor(/* config.basePath */ basePath, webpackPlugin) {
         throw err
       }
 
-      done(err, content && content.toString())
+      function addManifest(content) {
+				var hotFiles = JSON.stringify(webpackPlugin.hotFiles.concat(webpackPlugin.failedFiles));
+			  return content.replace(/__karmaWebpackManifest__\s*=\s*\[\s*\]/gm, "__karmaWebpackManifest__=" + hotFiles)
+      }
+
+      done(err, content && addManifest(content.toString()))
     })
   }
 }
